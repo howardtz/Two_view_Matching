@@ -1,83 +1,20 @@
 import cv2
+import random
 import numpy as np
 
-img1 = cv2.imread("./data/00000022.jpg")
-img2 = cv2.imread("./data/00000023.jpg")
-
-img1_gray = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-img2_gray = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-
-# Step 1: feature extraction
-sift = cv2.SIFT_create()
-# find the keypoints and descriptors with SIFT
-kp1, des1 = sift.detectAndCompute(img1_gray,None)
-kp2, des2 = sift.detectAndCompute(img2_gray,None)
-
-# Step 2: feature match
-# FLANN parameters
-FLANN_INDEX_KDTREE = 1
-index_params = dict(algorithm = FLANN_INDEX_KDTREE, trees = 5)
-search_params = dict(checks=50)
-flann = cv2.FlannBasedMatcher(index_params,search_params)
-matches = flann.knnMatch(des1,des2,k=2)
-# bf = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
-# matches = bf.match(des1, des2)
-# matches = sorted(matches, key=lambda x: x.distance)
-
-pts1 = []
-pts2 = []
-# ratio test as per Lowe's paper
-k = 0
-goodMatch = []
-for i,(m,n) in enumerate(matches):
-    if m.distance < 0.45 * n.distance:
-        pts2.append(kp2[m.trainIdx].pt)
-        pts1.append(kp1[m.queryIdx].pt)
-        goodMatch.append(m)
-        k = k + 1
-        if k == 8:
-            # only reserve 8 points
-            break
-# threshold = 100
-# for match in matches:
-#     if match.distance < threshold:
-#         goodMatch.append(match)
-#         pts2.append(kp2[match.trainIdx].pt)
-#         pts1.append(kp1[match.queryIdx].pt)
-#         k = k + 1
-#         if k == 8:
-#             # only reserve 8 points
-#             break
-pts1 = np.int32(pts1)
-pts2 = np.int32(pts2)
-
-
-# opencv's default Fundamental Matrix estimation
-F, mask = cv2.findFundamentalMat(pts1,pts2)
-print(F)
-
-p_a = np.array([[pts1[1][0]], [pts1[1][1]], [1]])
-p_b = np.array([[pts2[1][0]], [pts2[1][1]], [1]])
-r_ocv = np.matmul(p_a.T, F)
-r_ocv = np.matmul(r_ocv, p_b)
-print(r_ocv)
-
-def generate_fundamental_matrix(pt1_list, pt2_list):
+def fundamental_matrix(pts1, pts2):
     A = []
-    for i in range(len(pt1_list)):
-        x_a = pt1_list[i,0]
-        y_a = pt1_list[i,1]
-        x_b = pt2_list[i,0]
-        y_b = pt2_list[i,1]
-        row = [x_a * x_b, x_b * y_a, x_b,
-               y_b * x_a, y_a * y_b, y_b,
-                     x_a,       y_a,   1]
+    for i in range(len(pts1)):
+        p1_x = pts1[i,0]
+        p1_y = pts1[i,1]
+        p2_x = pts2[i,0]
+        p2_y = pts2[i,1]
+        row = [p1_x * p2_x, p2_x * p1_y, p2_x, p2_y * p1_x, p1_y * p2_y, p2_y, p1_x, p1_y, 1]
         A.append(row)
     A = np.array(A)
     U, D, V = np.linalg.svd(A, full_matrices=True)
     F = V[-1, :]
     F = np.reshape(F, (3, 3))
-
     U, D, V = np.linalg.svd(F, full_matrices=True)
     d = np.zeros((3, 3))
     d[0, 0] = D[0]
@@ -85,16 +22,86 @@ def generate_fundamental_matrix(pt1_list, pt2_list):
     F = np.dot(U, np.dot(d, V))
     return F
 
+def normalized_fundamental_matrix(pts1, pts2):
+    mean_p1_x = np.mean(pts1[:, 0])
+    mean_p1_y = np.mean(pts1[:, 1])
+    mean_p2_x = np.mean(pts2[:, 0])
+    mean_p2_y = np.mean(pts2[:, 1])
+    sx1 = 1 / np.mean(np.abs(pts1[:, 0] - mean_p1_x))
+    sy1 = 1 / np.mean(np.abs(pts1[:, 1] - mean_p1_y))
+    sx2 = 1 / np.mean(np.abs(pts2[:, 0] - mean_p2_x))
+    sy2 = 1 / np.mean(np.abs(pts2[:, 1] - mean_p2_y))
+    pts1_norm = np.array([[sx1 * (x - mean_p1_x), sy1 * (y - mean_p1_y)] for x, y in pts1])
+    pts2_norm = np.array([[sx2 * (x - mean_p2_x), sy2 * (y - mean_p2_y)] for x, y in pts2])
+    T1 = np.array([[sx1, 0, -sx1 * mean_p1_x],
+                   [0, sy1, -sy1 * mean_p1_y],
+                   [0, 0, 1]])
+    T2 = np.array([[sx2, 0, -sx2 * mean_p2_x],
+                   [0, sy2, -sy2 * mean_p2_y],
+                   [0, 0, 1]])
+    F = fundamental_matrix(pts1_norm, pts2_norm)
+    F = np.dot(T1.T, np.dot(F, T2))
+    return F
 
-F_svd = generate_fundamental_matrix(pts1,pts2)
-print(F_svd)
+def RANSAC_8points(good_matches):
+    pts1 = []
+    pts2 = []
+    points = random.sample(good_matches, 8)
+    for point in points:
+        pts1.append(kp1[point.queryIdx].pt)
+        pts2.append(kp2[point.trainIdx].pt)
+    pts1 = np.array(pts1)
+    pts2 = np.array(pts2)
+    return pts1,pts2,points
 
-p_a = np.array([[pts1[1][0]], [pts1[1][1]], [1]])
-p_b = np.array([[pts2[1][0]], [pts2[1][1]], [1]])
-r_ocv = np.matmul(p_a.T, F_svd)
-r_ocv = np.matmul(r_ocv, p_b)
-print(r_ocv)
+def f_judge(F,good_matches,kps1,kps2,threshold):
+    num = 0
+    ransac_good = []
+    for good_match in good_matches:
+        p1 = kps1[good_match.queryIdx].pt
+        p2 = kps2[good_match.trainIdx].pt
+        p1 = np.array([p1[0], p1[1], 1])
+        p2 = np.array([p2[0], p2[1], 1])
+        res = np.matmul(np.matmul(p1.T, F), p2)
+        if abs(res) < threshold:
+            ransac_good.append(good_match)
+    return ransac_good
 
-res = cv2.drawMatches(img1,kp1,img2,kp2,goodMatch,None,(0,255,0))
+def RANSAC_8point_F(good_matches,kps1,kps2,threshold,acc):
+    while True:
+        pts1,pts2,points = RANSAC_8points(good_matches)
+        F = normalized_fundamental_matrix(pts1,pts2)
+        ransac_good = f_judge(F,good_matches,kps1,kps2,threshold)
+        if len(ransac_good) >= acc * len(good_matches):
+            return F, ransac_good, points
 
-cv2.imwrite('res.jpg',res)
+def main():
+    img1 = cv2.imread("./data/00000022.jpg")
+    img2 = cv2.imread("./data/00000023.jpg")
+    img1_gray = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+    img2_gray = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+
+    # feature extraction
+    sift = cv2.SIFT_create()
+    # find the key points and descriptors with SIFT
+    kps1, des1 = sift.detectAndCompute(img1_gray,None)
+    kps2, des2 = sift.detectAndCompute(img2_gray,None)
+    # feature match
+    # FLANN parameters
+    FLANN_INDEX_KDTREE = 1
+    index_params = dict(algorithm = FLANN_INDEX_KDTREE, trees = 5)
+    search_params = dict(checks=50)
+    flann = cv2.FlannBasedMatcher(index_params,search_params)
+    matches = flann.knnMatch(des1,des2,k=2)
+    # find good match points
+    good_matches = []
+    for (m,n) in enumerate(matches):
+        if m.distance < 0.7 * n.distance:
+            good_matches.append(m)
+    F, ransac_good, points = RANSAC_8point_F(good_matches,kps1,kps2,0.1,0.95)
+    print(F)
+    res = cv2.drawMatches(img1,kps1,img2,kps2,points,None)
+    cv2.imwrite('res.jpg',res)
+
+if __name__ == '__main__':
+    main()
